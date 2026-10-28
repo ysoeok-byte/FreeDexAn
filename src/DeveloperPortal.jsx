@@ -1,23 +1,61 @@
-import { useState } from 'react';
-import {
-  Ban, Code2, Copy, ExternalLink, KeyRound, Search, Settings, Upload
-} from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { AlertCircle, Ban, Check, Code2, Copy, ExternalLink, KeyRound, RefreshCw, Search, Upload } from 'lucide-react';
 
-export default function DeveloperPortal() {
+async function request(url, options = {}) {
+  const response = await fetch(url, { credentials: 'include', ...options });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || 'La requête a échoué.');
+  return payload;
+}
+
+export default function DeveloperPortal({ user, onNotice }) {
+  const [keys, setKeys] = useState([]);
   const [name, setName] = useState('');
-  const [write, setWrite] = useState(true);
-  const [key, setKey] = useState('');
-  const [notice, setNotice] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [write, setWrite] = useState(false);
+  const [allowedKinds, setAllowedKinds] = useState(['anime', 'film', 'scan', 'webtoon']);
+  const [issuedKey, setIssuedKey] = useState('');
+  const [testKey, setTestKey] = useState('');
   const [result, setResult] = useState('');
-  const [count, setCount] = useState(null);
+  const [docs, setDocs] = useState(null);
+  const [docsError, setDocsError] = useState('');
+  const [docsLoading, setDocsLoading] = useState(true);
+  const [keysLoading, setKeysLoading] = useState(true);
+  const [keysError, setKeysError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const kindOptions = [
+    { id: 'anime', label: 'Animés' },
+    { id: 'film', label: 'Films' },
+    { id: 'scan', label: 'Scans' },
+    { id: 'webtoon', label: 'Webtoons' }
+  ];
 
-  const request = async (url, options = {}) => {
-    const response = await fetch(url, options);
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || 'La requête a échoué.');
-    return payload;
+  const refreshKeys = async () => {
+    setKeysError('');
+    try {
+      const payload = await request('/api/keys');
+      setKeys(payload.keys || []);
+    } catch (error) {
+      setKeysError(error.message);
+      onNotice(error.message);
+    } finally {
+      setKeysLoading(false);
+    }
   };
+  const refreshDocs = async () => {
+    setDocsLoading(true);
+    setDocsError('');
+    try {
+      setDocs(await request('/api/docs'));
+    } catch (error) {
+      setDocsError(error.message);
+    } finally {
+      setDocsLoading(false);
+    }
+  };
+  useEffect(() => {
+    refreshKeys();
+    refreshDocs();
+  }, []);
 
   const createKey = async (event) => {
     event.preventDefault();
@@ -26,68 +64,62 @@ export default function DeveloperPortal() {
       const payload = await request('/api/keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, write })
+        body: JSON.stringify({ name, write, allowedKinds })
       });
-      setKey(payload.apiKey);
+      setIssuedKey(payload.apiKey);
       setName('');
-      setNotice('Clé créée. Copiez-la maintenant : elle ne sera affichée qu’une seule fois.');
+      setAllowedKinds(['anime', 'film', 'scan', 'webtoon']);
+      await refreshKeys();
+      onNotice('Clé créée. Copiez-la maintenant : elle ne sera plus affichée.');
     } catch (error) {
-      setNotice(error.message);
+      onNotice(error.message);
     } finally {
       setBusy(false);
     }
   };
 
-  const testKey = async () => {
-    if (!key.trim()) return setNotice('Créez une clé ou collez-en une avant le test.');
-    setBusy(true);
-    try {
-      const payload = await request('/api/v1/works?limit=10', {
-        headers: { Authorization: `Bearer ${key.trim()}` }
-      });
-      setCount(payload.data?.length || 0);
-      setResult(JSON.stringify(payload, null, 2));
-      setNotice(`${payload.data?.length || 0} œuvre(s) reçue(s).`);
-    } catch (error) {
-      setNotice(error.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const revoke = async () => {
-    if (!key.trim()) return setNotice('Collez la clé à révoquer.');
+  const revoke = async (id) => {
     if (!window.confirm('Révoquer cette clé ? Les applications qui l’utilisent perdront immédiatement l’accès.')) return;
     setBusy(true);
     try {
-      await request('/api/keys/current', {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${key.trim()}` }
-      });
-      setKey('');
-      setNotice('Clé révoquée.');
+      await request(`/api/keys/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await refreshKeys();
+      onNotice('Clé révoquée.');
     } catch (error) {
-      setNotice(error.message);
+      onNotice(error.message);
     } finally {
       setBusy(false);
     }
   };
 
-  const importFile = async (event) => {
+  const test = async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      const payload = await request('/api/v1/works?limit=10', { headers: { Authorization: `Bearer ${testKey.trim()}` } });
+      setResult(JSON.stringify(payload, null, 2));
+      onNotice(`${payload.data?.length || 0} œuvre(s) reçue(s).`);
+    } catch (error) {
+      onNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const importJson = async (event) => {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return;
-    if (!key.trim()) return setNotice('Collez une clé API avant l’import.');
     setBusy(true);
     try {
       const payload = await request('/api/v1/works/import', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${key.trim()}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${testKey.trim()}`, 'Content-Type': 'application/json' },
         body: await file.text()
       });
-      setNotice(`${payload.imported} œuvre(s) enregistrée(s) sur le serveur.`);
+      onNotice(`${payload.imported} œuvre(s) importée(s).`);
     } catch (error) {
-      setNotice(error.message);
+      onNotice(error.message);
     } finally {
       setBusy(false);
     }
@@ -95,60 +127,51 @@ export default function DeveloperPortal() {
 
   const copyKey = async () => {
     try {
-      await navigator.clipboard.writeText(key);
-      setNotice('Clé copiée.');
+      await navigator.clipboard.writeText(issuedKey);
+      onNotice('Clé copiée.');
     } catch {
-      setNotice('Sélectionnez puis copiez la clé affichée.');
+      onNotice('Sélectionnez puis copiez la clé affichée.');
     }
   };
 
-  return <div className="page developer-page">
-    <div className="developer-heading">
-      <span className="eyebrow"><Code2 size={14} /> MOZILANIM / API</span>
-      <h1>Connectez votre site</h1>
-      <p>Créez une clé, importez vos œuvres et utilisez les endpoints depuis votre application.</p>
-    </div>
-    {notice && <div className="source-notice" role="status">{notice}</div>}
-    <div className="developer-grid">
-      <section className="dev-card">
-        <div className="dev-card-heading"><KeyRound size={19} /><div><h2>Créer une clé API</h2><p>La clé brute n’est montrée qu’à sa création.</p></div></div>
-        <form className="dev-key-form" onSubmit={createKey}>
+  return <div className="page api-page">
+    <section className="api-heading"><span className="eyebrow"><Code2 size={14} /> ESPACE DÉVELOPPEUR</span><h1>API MozAnim</h1><p>Bonjour {user.name}. Une porte d’entrée claire vers le catalogue, les saisons et la lecture.</p></section>
+    <div className="api-notice"><ShieldCheckIcon /> Les clés sont personnelles et ne sont affichées qu’une seule fois. Conservez-les dans votre environnement serveur.</div>
+    <div className="api-grid">
+      <section className="api-card"><div className="api-card-title"><KeyRound size={19} /><div><h2>Créer une clé</h2><p>Chaque clé appartient à votre compte.</p></div></div>
+        <form onSubmit={createKey} className="key-form">
           <label className="field"><span>Nom du projet</span><input required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} placeholder="Mon site" /></label>
-          <label className="dev-checkbox"><input type="checkbox" checked={write} onChange={(event) => setWrite(event.target.checked)} /><span>Autoriser l’import et la modification de mes œuvres</span></label>
-          <button className="primary-button" disabled={busy}><KeyRound size={15} /> CRÉER LA CLÉ</button>
+          <fieldset className="kind-fieldset"><legend>Contenus accessibles avec cette clé</legend><div className="key-kind-options">{kindOptions.map((option) => <label className={`kind-choice ${allowedKinds.includes(option.id) ? 'checked' : ''}`} key={option.id}><input type="checkbox" checked={allowedKinds.includes(option.id)} onChange={() => setAllowedKinds((current) => current.includes(option.id) ? current.filter((value) => value !== option.id) : [...current, option.id])} /><span className="kind-check"><Check size={12} /></span>{option.label}</label>)}</div></fieldset>
+          <label className="checkbox-row"><input type="checkbox" checked={write} onChange={(event) => setWrite(event.target.checked)} /><span>Autoriser l’import de nouvelles œuvres</span></label>
+          <button className="button primary" disabled={busy || !name.trim() || !allowedKinds.length}><KeyRound size={15} /> Générer une clé</button>
         </form>
-        {key && <div className="issued-key">
-          <label>Votre clé — copiez-la maintenant, elle ne sera affichée qu’une fois</label>
-          <div><input readOnly value={key} onFocus={(event) => event.target.select()} /><button className="secondary-button" onClick={copyKey}><Copy size={14} /> COPIER</button></div>
-          <small>Ne mettez jamais la clé dans le JavaScript public de votre site. Utilisez-la côté serveur.</small>
-        </div>}
+        {issuedKey && <div className="issued-key"><label>Votre nouvelle clé, visible uniquement maintenant</label><div><input readOnly value={issuedKey} onFocus={(event) => event.target.select()} /><button className="button" onClick={copyKey}><Copy size={14} /> Copier</button></div><small>Gardez-la côté serveur. Ne la publiez jamais dans le code JavaScript de votre site.</small></div>}
       </section>
-      <section className="dev-card">
-        <div className="dev-card-heading"><Settings size={19} /><div><h2>Gérer votre clé</h2><p>La clé n’est pas conservée après la fermeture de cette page.</p></div></div>
-        <label className="field"><span>Clé API</span><input type="password" autoComplete="off" value={key} onChange={(event) => setKey(event.target.value)} placeholder="moz_…" /></label>
-        <div className="catalog-tools-actions">
-          <button className="secondary-button" disabled={busy || !key} onClick={testKey}><Search size={14} /> TESTER</button>
-          <button className="ghost-button danger-button" disabled={busy || !key} onClick={revoke}><Ban size={14} /> RÉVOQUER</button>
-        </div>
-        <label className="secondary-button import-json-button"><Upload size={15} /> IMPORTER UN JSON<input type="file" accept=".json,application/json" onChange={importFile} disabled={busy || !key} /></label>
+
+      <section className="api-card"><div className="api-card-title"><KeyRound size={19} /><div><h2>Vos clés</h2><p>{keys.length} clé(s) active(s)</p></div></div>
+        {keysLoading ? <div className="key-skeletons"><span /><span /><span /></div> : keysError ? <div className="portal-error"><AlertCircle size={16} /><span>{keysError}</span><button className="button small" onClick={refreshKeys}><RefreshCw size={13} /> Réessayer</button></div> : keys.length ? <div className="key-list">{keys.map((key) => {
+          const keyKinds = key.allowed_kinds || key.allowedKinds || [];
+          return <div className="key-row" key={key.id}><div><strong>{key.name}</strong><span>{key.key_prefix}•••• · {key.scopes?.includes('write') ? 'lecture + import' : 'lecture seule'}</span><div className="key-kind-tags">{keyKinds.length ? keyKinds.map((value) => <small key={value}>{kindOptions.find((option) => option.id === value)?.label || value}</small>) : <small>Tous les contenus</small>}</div></div><button className="icon-danger" onClick={() => revoke(key.id)} disabled={busy} aria-label={`Révoquer ${key.name}`}><Ban size={16} /></button></div>;
+        })}</div> : <p className="empty-inline">Aucune clé pour le moment. Créez-en une pour commencer.</p>}
       </section>
     </div>
-    <section className="dev-card docs-card">
-      <div className="dev-card-heading"><Code2 size={19} /><div><h2>Documentation rapide</h2><p>Limite : 120 requêtes par minute et par clé.</p></div></div>
-      <div className="api-endpoint-list">
-        <div><span className="method get">GET</span><code>/api/v1/works?q=naruto&amp;kind=anime&amp;page=1&amp;limit=20</code><p>Liste les œuvres de la clé et le catalogue public.</p></div>
-        <div><span className="method get">GET</span><code>/api/v1/works/:slug</code><p>Fiche, saisons, versions, lecteurs et épisodes.</p></div>
-        <div><span className="method post">POST</span><code>/api/v1/works/import</code><p>Importe jusqu’à 500 œuvres. Clé avec écriture requise.</p></div>
-        <div><span className="method get">GET</span><code>/api/anime-sama/planning</code><p>Planning des nouvelles sorties : animés, films, scans, webtoons.</p></div>
-        <div><span className="method get">GET</span><code>/api/anime-sama/work?url=URL_DE_FICHE</code><p>Récupère les liens actualisés d’une fiche autorisée.</p></div>
-      </div>
-      <pre className="api-code"><code>{`const response = await fetch("https://VOTRE-SITE/api/v1/works", {
-  headers: { Authorization: "Bearer VOTRE_CLE_API" }
-  // Gardez la clé côté serveur, jamais dans le code public.
-  // Écriture : POST /api/v1/works/import avec { "works": [...] }
-});`}</code></pre>
-      <div className="docs-footer"><a href="/api/docs" target="_blank" rel="noreferrer">Documentation JSON complète <ExternalLink size={14} /></a><span>{count === null ? 'Aucun test' : `${count} œuvres reçues`}</span></div>
-      {result && <details className="api-result"><summary>Voir le résultat du test</summary><pre>{result}</pre></details>}
+
+    <section className="api-card docs-card"><div className="api-card-title"><Code2 size={19} /><div><h2>Documentation</h2><p>120 requêtes par minute et par clé.</p></div></div>
+       {docsError && <div className="portal-error"><AlertCircle size={16} /><span>{docsError}</span><button className="button small" onClick={refreshDocs}><RefreshCw size={13} /> Réessayer</button></div>}
+       {docsLoading && <div className="docs-loading"><span /><span /></div>}
+       {docs && <div className="docs-summary"><p className="docs-intro">{docs.name} · version {docs.version} · authentification Bearer ou X-API-Key</p><pre className="api-code"><code>{JSON.stringify(docs, null, 2)}</code></pre></div>}
+      {docs?.endpoints?.length > 0 && <div className="endpoint-list">{docs.endpoints.map((endpoint, index) => <div key={`${endpoint.method}-${endpoint.path}-${index}`}><span className={`method ${String(endpoint.method).toLowerCase()}`}>{endpoint.method}</span><code>{endpoint.path}</code><p>{endpoint.description}</p></div>)}</div>}
+      <pre className="api-code"><code>{`const response = await fetch("/api/v1/works?limit=10", {\n  headers: { Authorization: "Bearer VOTRE_CLE_API" }\n});\nconst catalogue = await response.json();`}</code></pre>
+      <div className="docs-footer"><a href="/api/docs" target="_blank" rel="noreferrer">Ouvrir la documentation JSON <ExternalLink size={14} /></a><span>Une clé API est requise pour les données protégées.</span></div>
+    </section>
+
+    <section className="api-card test-card"><div className="api-card-title"><Search size={19} /><div><h2>Tester une clé</h2><p>Collez une clé existante pour vérifier son accès.</p></div></div>
+      <form className="test-form" onSubmit={test}><label className="field"><span>Clé API</span><input type="password" autoComplete="off" value={testKey} onChange={(event) => setTestKey(event.target.value)} placeholder="moz_…" /></label><div className="button-row"><button className="button" disabled={busy || !testKey.trim()}><Check size={14} /> Tester</button><label className="button upload-button"><Upload size={14} /> Importer un JSON<input type="file" accept=".json,application/json" onChange={importJson} disabled={busy || !testKey.trim()} /></label></div></form>
+      {result && <details className="api-result"><summary>Afficher le résultat du test</summary><pre>{result}</pre></details>}
     </section>
   </div>;
+}
+
+function ShieldCheckIcon() {
+  return <span className="notice-shield"><Check size={14} /></span>;
 }

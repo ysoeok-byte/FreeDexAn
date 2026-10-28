@@ -58,5 +58,5 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(port, '0.0.0.0', () => {
-  console.log(`Mozilanim production server listening on port ${port}`);
+  console.log(`MozAnim production server listening on port ${port}`);
 });

@@ -39,6 +39,20 @@ const absoluteUrl = (value, base = ANIME_SAMA_BASE_URL) => {
   }
 };
 
+const imageUrl = (value, base = ANIME_SAMA_BASE_URL) => {
+  const href = absoluteUrl(value, base);
+  try {
+    const url = new URL(href);
+    if (url.hostname === 'raw.githubusercontent.com' && url.pathname.startsWith('/Anime-Sama/IMG/img/')) {
+      url.hostname = 'cdn.jsdelivr.net';
+      url.pathname = url.pathname.replace('/Anime-Sama/IMG/img/', '/gh/Anime-Sama/IMG@img/');
+    }
+    return url.href;
+  } catch {
+    return '';
+  }
+};
+
 const fetchText = async (url, referer = `${ANIME_SAMA_BASE_URL}/`) => {
   let target = safeAnimeSamaUrl(url);
   const controller = new AbortController();
@@ -117,7 +131,7 @@ const parseCataloguePage = (html) => {
     const cardBlock = html.slice(match.index, cards[index + 1]?.index ?? html.length);
     const sourceUrl = absoluteUrl(extractAttribute(attributes, 'data-url'));
     const name = extractAttribute(attributes, 'data-nom');
-    const poster = absoluteUrl(extractAttribute(attributes, 'data-img'));
+    const poster = imageUrl(extractAttribute(attributes, 'data-img'));
     const classes = extractAttribute(attributes, 'class').toLowerCase();
     const badgeKind = cardBlock.match(/class=['"][^'"]*as-badge-(anime|film|scan|webtoon)[^'"]*['"]/i)?.[1]?.toLowerCase();
     const kind = badgeKind === 'webtoon' || /webtoon/.test(classes) ? 'webtoon'
@@ -139,11 +153,8 @@ const parseCataloguePage = (html) => {
       description: '',
       genres: extractGenres(cardBlock),
       year: '',
-      studio: 'Anime-Sama',
-      isStudio: false,
       isAnimeSama: true,
       sourceUrl,
-      status: 'En cours',
       seasons: []
     });
   }
@@ -186,9 +197,17 @@ async function refreshCatalogue() {
   return catalogueCache;
 }
 
+export async function getAnimeSamaCatalogue(forceRefresh = false) {
+  const fresh = catalogueCache && Date.now() - Date.parse(catalogueCache.updatedAt) < CACHE_TTL_MS;
+  if (!forceRefresh && fresh) return catalogueCache;
+  if (!refreshPromise) {
+    refreshPromise = refreshCatalogue().finally(() => { refreshPromise = null; });
+  }
+  return refreshPromise;
+}
+
 const parisDateTime = (timestampSeconds) => {
   const date = new Date(Number(timestampSeconds) * 1000);
-  if (!Number.isFinite(date.getTime())) return null;
   const parts = new Intl.DateTimeFormat('fr-CA', {
     timeZone: 'Europe/Paris',
     year: 'numeric',
@@ -214,8 +233,7 @@ const parsePlanningPage = (html) => {
     const cardBlock = html.slice(match.index, nextStart);
     const attributes = match[1];
     const name = extractAttribute(attributes, 'data-nom');
-    const sourcePath = extractAttribute(attributes, 'data-url');
-    const sourceUrl = absoluteUrl(sourcePath);
+    const sourceUrl = absoluteUrl(extractAttribute(attributes, 'data-url'));
     const image = extractAttribute(attributes, 'data-img');
     const classes = extractAttribute(attributes, 'class').toLowerCase();
     const category = cardBlock.match(/class=['"][^'"]*as-badge-(anime|film|scan|webtoon)[^'"]*['"]/i)?.[1]?.toLowerCase();
@@ -234,11 +252,11 @@ const parsePlanningPage = (html) => {
     }
     const day = new Date(`${schedule.date}T12:00:00Z`).getUTCDay();
     return {
-      id: `anime-sama-${slugify(name)}`,
+      id: `anime-sama-${slugify(name)}-${schedule.date}-${schedule.time.replace(/\D/g, '')}-${index + 1}`,
       slug: slugify(name),
       name,
       kind,
-      poster: image ? absoluteUrl(image) : '',
+      poster: imageUrl(image),
       sourceUrl,
       schedule: { ...schedule, day },
       isAnimeSama: true
@@ -264,15 +282,6 @@ export async function getAnimeSamaPlanning(forceRefresh = false) {
   if (!forceRefresh && fresh) return planningCache;
   if (!planningPromise) planningPromise = refreshPlanning().finally(() => { planningPromise = null; });
   return planningPromise;
-}
-
-export async function getAnimeSamaCatalogue(forceRefresh = false) {
-  const fresh = catalogueCache && Date.now() - Date.parse(catalogueCache.updatedAt) < CACHE_TTL_MS;
-  if (!forceRefresh && fresh) return catalogueCache;
-  if (!refreshPromise) {
-    refreshPromise = refreshCatalogue().finally(() => { refreshPromise = null; });
-  }
-  return refreshPromise;
 }
 
 const extractTagText = (html, selectors) => {
@@ -304,6 +313,142 @@ const extractPanelEntries = (html, pageUrl) => {
   return [...unique.values()];
 };
 
+const extractChapters = (html, pageUrl) => {
+  const chapters = [];
+  for (const match of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    const attributes = match[1];
+    const title = decodeHtml(match[2].replace(/<[^>]*>/g, ''));
+    const href = absoluteUrl(extractAttribute(attributes, 'href'), pageUrl);
+    if (!title || !href || !/(?:chap(?:itre|ter)?|tome|volume)\s*[\d.]+/i.test(`${title} ${href}`)) continue;
+    try {
+      safeAnimeSamaUrl(href);
+    } catch {
+      continue;
+    }
+    chapters.push({ name: title.slice(0, 120), url: href });
+  }
+  return [...new Map(chapters.map((chapter) => [chapter.url, chapter])).values()].slice(0, 500);
+};
+
+const extractReaderImages = (html, pageUrl) => {
+  const ignored = /(?:logo|icon|avatar|banner|advert|pub|sprite|flag)/i;
+  const images = [];
+  for (const match of html.matchAll(/<img\b([^>]*)>/gi)) {
+    const attrs = match[1];
+    const candidate = extractAttribute(attrs, 'data-src')
+      || extractAttribute(attrs, 'data-lazy-src')
+      || extractAttribute(attrs, 'data-original')
+      || extractAttribute(attrs, 'src');
+    const alt = extractAttribute(attrs, 'alt');
+    if (!candidate || ignored.test(`${candidate} ${alt}`)) continue;
+    try {
+      const image = new URL(candidate, pageUrl);
+      if (!['http:', 'https:'].includes(image.protocol)) continue;
+      images.push(image.href);
+    } catch {
+      continue;
+    }
+  }
+  return [...new Set(images)].slice(0, 1000);
+};
+
+const scanChapterLabels = (html, total) => {
+  const scripts = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)]
+    .map((match) => match[1].replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, ''))
+    .join('\n');
+  const calls = /\b(resetListe|creerListe|newSPF|newSP|finirListe)\s*\(([^)]*)\)/gi;
+  const labels = [];
+  let specialCount = 0;
+
+  for (const match of scripts.matchAll(calls)) {
+    const operation = match[1].toLowerCase();
+    const args = match[2].split(',').map((arg) => arg.trim().replace(/^['"]|['"]$/g, ''));
+    const first = Number(args[0]?.replace(',', '.'));
+
+    if (operation === 'resetliste') {
+      labels.length = 0;
+      specialCount = 0;
+    } else if (operation === 'creerliste') {
+      const last = Number(args[1]?.replace(',', '.'));
+      if (!Number.isInteger(first) || !Number.isInteger(last)) continue;
+      for (let value = first; value <= last && labels.length < total; value += 1) {
+        labels.push(`Chapitre ${value}`);
+      }
+    } else if (operation === 'newsp' || operation === 'newspf') {
+      const label = decodeHtml(args[0] || '');
+      if (label) {
+        labels.push(operation === 'newsp' ? `Chapitre ${label}` : label);
+        specialCount += 1;
+      }
+    } else if (operation === 'finirliste' && Number.isInteger(first)) {
+      const last = Math.max(0, total - specialCount);
+      for (let value = first; value <= last && labels.length < total; value += 1) {
+        labels.push(`Chapitre ${value}`);
+      }
+    }
+  }
+
+  if (!labels.length) {
+    return Array.from({ length: total }, (_, index) => `Chapitre ${index + 1}`);
+  }
+  return labels.slice(0, total);
+};
+
+const getScanChapterInfo = async (sourceUrl) => {
+  const safeUrl = safeAnimeSamaUrl(sourceUrl);
+  const page = await fetchText(safeUrl);
+  const title = extractTagText(page.text, [
+    /<[^>]+\bid=['"]titreOeuvre['"][^>]*>([\s\S]*?)<\/[^>]+>/i,
+    /<h1\b[^>]*>([\s\S]*?)<\/h1>/i
+  ]);
+  if (!title) throw new Error('Le titre du lecteur de scan est introuvable.');
+
+  const countsUrl = new URL('/s2/scans/get_nb_chap_et_img.php', ANIME_SAMA_BASE_URL);
+  countsUrl.searchParams.set('oeuvre', title);
+  const countsResponse = await fetchText(countsUrl.href, page.url);
+  let counts;
+  try {
+    counts = JSON.parse(countsResponse.text);
+  } catch {
+    throw new Error('La liste des chapitres source est illisible.');
+  }
+  if (!counts || typeof counts !== 'object' || Array.isArray(counts)) {
+    throw new Error('La liste des chapitres source est invalide.');
+  }
+
+  const total = Object.keys(counts).length;
+  const labels = scanChapterLabels(page.text, total);
+  const chapters = labels.map((name, index) => ({
+    id: `scan-${slugify(title)}-${index + 1}`,
+    name,
+    url: page.url,
+    sequence: index + 1,
+    pageCount: Number(counts[String(index + 1)]) || 0
+  })).filter((chapter) => chapter.pageCount > 0);
+
+  return { title, counts, chapters };
+};
+
+const getAnimeSamaScanChapter = async (sourceUrl, sequenceValue) => {
+  const sequence = Number(sequenceValue);
+  if (!Number.isInteger(sequence) || sequence < 1 || sequence > 1000) {
+    throw new Error('Le numéro du chapitre est invalide.');
+  }
+  const { title, counts, chapters } = await getScanChapterInfo(sourceUrl);
+  const pageCount = Number(counts[String(sequence)]);
+  if (!Number.isInteger(pageCount) || pageCount < 1 || pageCount > 1000) {
+    throw new Error('Ce chapitre ne contient aucune page disponible.');
+  }
+  const pages = Array.from({ length: pageCount }, (_, index) => {
+    const path = `/s2/scans/${encodeURIComponent(title)}/${sequence}/${index + 1}.jpg`;
+    return absoluteUrl(path);
+  });
+  return {
+    name: `${title} · ${chapters.find((chapter) => chapter.sequence === sequence)?.name || `Chapitre ${sequence}`}`,
+    pages
+  };
+};
+
 const extractMeta = (html, property) => {
   const escaped = property.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const match = html.match(new RegExp(`<meta\\b(?=[^>]*(?:property|name)=['"]${escaped}['"])[^>]*content=['"]([^'"]*)['"][^>]*>`, 'i'))
@@ -317,16 +462,59 @@ async function getEpisodesForVersion(seasonUrl, versionName) {
   const page = await fetchText(safeAnimeSamaUrl(`${base}/${version}`));
   const sourceMatch = page.text.match(/<script\b(?=[^>]*src=['"][^'"]*episodes\.js[^'"]*['"])[^>]*src=['"]([^'"]+)['"][^>]*>/i)
     || page.text.match(/<script\b[^>]*src=['"]([^'"]*episodes\.js[^'"]*)['"][^>]*>/i);
-  if (!sourceMatch) return { name: versionName, readers: [] };
+  if (!sourceMatch) {
+    return {
+      name: versionName,
+      readers: [{ name: 'Lecteur Anime-Sama', episodes: [], available: false }]
+    };
+  }
 
   const scriptUrl = safeAnimeSamaUrl(absoluteUrl(sourceMatch[1], page.url));
   const js = (await fetchText(scriptUrl, page.url)).text;
   const arrays = [...js.matchAll(/var\s+(eps\w+)\s*=\s*\[([\s\S]*?)\]\s*;/gi)];
-  const readers = arrays.map((match, index) => ({
-    name: `Lecteur ${String(match[1]).replace(/^eps/i, '') || index + 1}`,
-    episodes: [...match[2].matchAll(/['"](https?:\/\/[^'"]+)['"]/g)].map((episode) => episode[1].trim())
-  })).filter((reader) => reader.episodes.length);
+  const readers = arrays.map((match, index) => {
+    const episodes = [...match[2].matchAll(/['"](https:\/\/[^'"]+)['"]/g)].map((episode) => episode[1].trim());
+    return {
+      name: `Lecteur ${String(match[1]).replace(/^eps/i, '') || index + 1}`,
+      episodes,
+      available: episodes.length > 0
+    };
+  });
+  if (!readers.length) readers.push({ name: 'Lecteur Anime-Sama', episodes: [], available: false });
   return { name: versionName, readers };
+}
+
+const extractVideoSources = (html, pageUrl) => {
+  const sources = [];
+  const add = (attributes, fallbackName, candidateName = 'src') => {
+    const candidate = extractAttribute(attributes, candidateName)
+      || extractAttribute(attributes, 'data-src')
+      || extractAttribute(attributes, 'data-lazy-src');
+    if (!candidate) return;
+    try {
+      const url = new URL(candidate, pageUrl);
+      if (url.protocol !== 'https:' || !url.hostname.includes('.') || url.hostname === 'localhost') return;
+      sources.push({
+        name: extractAttribute(attributes, 'title') || extractAttribute(attributes, 'data-title') || fallbackName,
+        url: url.href
+      });
+    } catch {
+      // Ignore malformed or non-web player URLs.
+    }
+  };
+
+  for (const match of html.matchAll(/<iframe\b([^>]*)>/gi)) add(match[1], `Lecteur ${sources.length + 1}`);
+  for (const match of html.matchAll(/<video\b([^>]*)>/gi)) add(match[1], `Vidéo ${sources.length + 1}`);
+  for (const match of html.matchAll(/<source\b([^>]*)>/gi)) add(match[1], `Vidéo ${sources.length + 1}`);
+  return [...new Map(sources.map((source) => [source.url, source])).values()].slice(0, 12);
+};
+
+async function getAnimeSamaEpisode(sourceUrl) {
+  const page = await fetchText(safeAnimeSamaUrl(sourceUrl));
+  return {
+    name: extractTagText(page.text, [/<h1\b[^>]*>([\s\S]*?)<\/h1>/i, /<title\b[^>]*>([\s\S]*?)<\/title>/i]) || 'Épisode',
+    streams: extractVideoSources(page.text, page.url)
+  };
 }
 
 const withConcurrency = async (items, concurrency, callback) => {
@@ -350,8 +538,15 @@ export async function getAnimeSamaWork(sourceUrl, forceRefresh = false) {
   const page = await fetchText(safeUrl);
   const title = extractTagText(page.text, [/<h1\b[^>]*>([\s\S]*?)<\/h1>/i, /<title\b[^>]*>([\s\S]*?)<\/title>/i]);
   const description = extractMeta(page.text, 'description') || extractMeta(page.text, 'og:description');
-  const poster = absoluteUrl(extractMeta(page.text, 'og:image'), page.url);
+  const poster = imageUrl(extractMeta(page.text, 'og:image'), page.url);
   const panels = extractPanelEntries(page.text, page.url).slice(0, 30);
+  const chapters = extractChapters(page.text, page.url);
+  const scanChapters = await withConcurrency(panels.filter((panel) => ['scan', 'webtoon'].includes(panel.kind)), 3, async (panel) => {
+    const scan = await getScanChapterInfo(panel.sourceUrl);
+    return scan.chapters;
+  });
+  const typeMatch = page.text.match(/as-badge-(anime|film|scan|webtoon)/i);
+  const kind = typeMatch?.[1]?.toLowerCase() || 'anime';
   const seasons = await withConcurrency(panels, 4, async (panel, index) => {
     if (!['anime', 'film'].includes(panel.kind)) {
       return { id: `source-${slugify(panel.name)}-${index + 1}`, name: panel.name, kind: panel.kind, sourceUrl: panel.sourceUrl, versions: [] };
@@ -360,7 +555,11 @@ export async function getAnimeSamaWork(sourceUrl, forceRefresh = false) {
       try {
         return await getEpisodesForVersion(panel.sourceUrl, versionName);
       } catch (error) {
-        return { name: versionName, readers: [], error: error.message };
+        return {
+          name: versionName,
+          readers: [{ name: 'Lecteur Anime-Sama', episodes: [], available: false }],
+          error: error.message
+        };
       }
     });
     return {
@@ -368,20 +567,21 @@ export async function getAnimeSamaWork(sourceUrl, forceRefresh = false) {
       name: panel.name,
       kind: panel.kind,
       sourceUrl: panel.sourceUrl,
-      versions: versions.filter((version) => version.readers.length)
+      versions
     };
   });
 
   const data = {
     id: `anime-sama-${slugify(title || safeUrl)}`,
     name: title || panels[0]?.name || 'Œuvre Anime-Sama',
-    kind: 'anime',
+    kind,
     sourceUrl: page.url,
     poster,
     description,
     genres: extractGenres(page.text),
     updatedAt: new Date().toISOString(),
-    seasons
+    seasons,
+    chapters: [...chapters, ...scanChapters.flat()]
   };
   workCache.set(safeUrl, { timestamp: Date.now(), data });
   return data;
@@ -415,6 +615,16 @@ const routeRequest = async (request, response) => {
     sendJson(response, 200, { ...catalogue, count: filtered.length, items: filtered });
     return true;
   }
+  if (url.pathname === '/api/anime-sama/planning' && request.method === 'GET') {
+    const forceRefresh = url.searchParams.get('refresh') === 'true';
+    if (forceRefresh && !allowForcedRefresh('planning')) {
+      sendJson(response, 429, { error: 'Une actualisation récente est déjà en cours. Réessayez dans quelques secondes.' });
+      return true;
+    }
+    const planning = await getAnimeSamaPlanning(forceRefresh);
+    sendJson(response, 200, planning);
+    return true;
+  }
   if (url.pathname === '/api/anime-sama/work' && request.method === 'GET') {
     const sourceUrl = url.searchParams.get('url');
     if (!sourceUrl) {
@@ -430,14 +640,40 @@ const routeRequest = async (request, response) => {
     sendJson(response, 200, work);
     return true;
   }
-  if (url.pathname === '/api/anime-sama/planning' && request.method === 'GET') {
-    const forceRefresh = url.searchParams.get('refresh') === 'true';
-    if (forceRefresh && !allowForcedRefresh('planning')) {
-      sendJson(response, 429, { error: 'Une actualisation récente est déjà en cours. Réessayez dans quelques secondes.' });
+  if (url.pathname === '/api/anime-sama/chapter' && request.method === 'GET') {
+    const sourceUrl = url.searchParams.get('url');
+    if (!sourceUrl) {
+      sendJson(response, 400, { error: 'Le paramètre url est obligatoire.' });
       return true;
     }
-    const planning = await getAnimeSamaPlanning(forceRefresh);
-    sendJson(response, 200, planning);
+    const sequence = url.searchParams.get('sequence');
+    if (sequence && /\/scan\/(?:vf|vostfr|va)(?:\/|$)/i.test(new URL(safeAnimeSamaUrl(sourceUrl)).pathname)) {
+      const chapter = await getAnimeSamaScanChapter(sourceUrl, sequence);
+      sendJson(response, 200, chapter);
+      return true;
+    }
+    const page = await fetchText(safeAnimeSamaUrl(sourceUrl));
+    const title = extractTagText(page.text, [/<h1\b[^>]*>([\s\S]*?)<\/h1>/i, /<title\b[^>]*>([\s\S]*?)<\/title>/i]);
+    const pages = extractReaderImages(page.text, page.url);
+    if (!pages.length) {
+      sendJson(response, 404, { error: 'Aucune page de lecture détectée sur cette source.' });
+      return true;
+    }
+    sendJson(response, 200, { name: title || 'Chapitre', pages });
+    return true;
+  }
+  if (url.pathname === '/api/anime-sama/episode' && request.method === 'GET') {
+    const sourceUrl = url.searchParams.get('url');
+    if (!sourceUrl) {
+      sendJson(response, 400, { error: 'Le paramètre url est obligatoire.' });
+      return true;
+    }
+    const episode = await getAnimeSamaEpisode(sourceUrl);
+    if (!episode.streams.length) {
+      sendJson(response, 404, { error: 'Aucun lecteur vidéo intégrable n’a été détecté pour cet épisode.' });
+      return true;
+    }
+    sendJson(response, 200, episode);
     return true;
   }
   return false;
